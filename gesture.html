@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html>
+<meta http-equiv=Content-Type content="text/html; charset=utf-8">
+
+<head>
+    <title>手势识别</title>
+    <style>
+        body {
+            background-color: rgb(40, 40, 40);
+            padding-top: 40px;
+        }
+
+        canvas {
+            display: block;
+            margin: 0 auto;
+            border: 1px solid red;
+        }
+
+        #btn-div {
+            padding-top: 10px;
+            width: 200px;
+            display: block;
+            margin: 0 auto;
+        }
+    </style>
+
+</head>
+
+<body>
+    <video width="640" height="480" hidden></video>
+    <canvas width="640" height="480"></canvas>
+    <!-- <canvas width="320" height="240"></canvas> -->
+    <div id="btn-div">
+        <button id="start" style="width:80px;height:25px;">open</button>
+        <button id="snap" style="width:80px;height:25px;" hidden>clip</button>
+        <button id="close" style="width:80px;height:25px;">close</button>
+    </div>
+    <!-- <script src='js/ort.min.js'></script> -->
+    
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.12.1/dist/ort.min.js"></script>
+    <script src="js/opencv.js"></script>
+    <script>
+        var canvas = document.getElementsByTagName('canvas')[0],
+            // canvas2 = document.getElementsByTagName('canvas')[1],
+            context = canvas.getContext('2d'),
+            video = document.getElementsByTagName("video")[0],
+            snap = document.getElementById("snap"),
+            close = document.getElementById("close"),
+            start = document.getElementById("start"),
+            MediaStreamTrack,
+            session,
+            isweb = true, //web端尺寸155*115
+            cv2;
+
+
+
+        var init_model = async function () { //初始化识别引擎，加载onnx模型，初始化opencv
+            options_cpu = {
+                // executionProviders: ['wasm'],
+                executionProviders: ['webgl'], //webgl 版本需要做sim 处理
+            };
+            if (isweb) {
+                session = await ort.InferenceSession.create('./weights/handgesture-mobilenetv2_155_115_0729_sim.onnx', options_cpu); //加载手势识别模型
+                // session = await ort.InferenceSession.create('./weights/handgesture-mobilenetv3_155_115_large.onnx', options_cpu); 
+            }
+            else {
+                session = await ort.InferenceSession.create('./weights/handgesture-mobilenetv2_112_112_0627.onnx', options_cpu); //加载人脸检测模型
+            }
+
+            cv2 = await cv; //加载opencv
+        }
+
+        var detect = async function () { //单帧检测
+            // try {
+            var old_date = new Date();
+            var frame_rgba = cv2.imread(canvas); //获取图像-cpu8%
+            if (isweb) {
+                var result = await get_gesture_0();//155_115
+            }
+            else {
+                var result = await get_gesture();//人脸检测获取人脸框
+            }
+
+            var new_date = new Date();
+            let fps = parseInt(1000 / (new_date - old_date));
+            cv2.putText(frame_rgba, "fps:" + fps.toString(), new cv2.Point(500, 60), cv2.FONT_HERSHEY_PLAIN, 1.5, new cv2.Scalar(255, 0, 0, 255), 2);
+            cv2.putText(frame_rgba, result[0].toString() + "_" + result[1].toFixed(2).toString(), new cv2.Point(20, 60), cv2.FONT_HERSHEY_PLAIN, 2, new cv2.Scalar(255, 0, 0, 255), 2);
+            cv2.imshow(canvas, frame_rgba);
+            delete (new_date);
+            delete (old_date)
+
+            // }
+            // catch (ex) {
+            //     console.log('detect:' + ex);
+            // }
+            // finally {
+            if (frame_rgba) {
+                frame_rgba.delete(); //释放资源
+            }
+            // }
+        }
+        var get_gesture = async function () { //手势检测 112*112
+            try {
+                let imgData = context.getImageData(0, 0, 640, 480);
+                var frame = cv2.matFromImageData(imgData);
+
+                let scaled_size = [112, 112];
+                let dsize = new cv2.Size(112, 112);
+                let frame_rgba = new cv2.Mat();
+                // cv2.resize(frame, frame_rgba, dsize, 0, 0, cv2.INTER_LINEAR);
+                cv2.resize(frame, frame_rgba, dsize, 0, 0, cv2.INTER_CUBIC);
+
+                frame.delete();
+                // let rect_tmp = new cv2.Rect(4, 4, 155, 115); //面部矩形
+                // let frame_crop = frame_rgba.roi(rect_tmp); //截取到的面部图像
+
+                let frame_rgb = new cv2.Mat();
+                cv2.cvtColor(frame_rgba, frame_rgb, cv2.COLOR_RGBA2RGB); //rgba转换成rgb
+
+                let data = frame_rgb.data;
+                let new_Data = new Float32Array(3 * scaled_size[0] * scaled_size[1]);
+                let index = 0;
+
+                for (let i = 0; i < data.length; i += 3) { //数据预处理 cpu-30% debug-15ms
+                    new_Data[index] = (data[i] / 255 - 0.5) / 0.5;
+                    index++;
+                }
+                for (let i = 1; i < data.length; i += 3) {
+                    new_Data[index] = (data[i] / 255 - 0.5) / 0.5;
+                    index++;
+                }
+                for (let i = 2; i < data.length; i += 3) {
+                    new_Data[index] = (data[i] / 255 - 0.5) / 0.5;
+                    index++;
+                }
+
+                let input = new ort.Tensor('float32', new_Data, [1, 3, scaled_size[1], scaled_size[0]]);
+                let feeds = { "input": input };
+                let result = await session.run(feeds); //retinaface 人脸检测 50ms
+                result = result.output.data;
+                let r = [];
+                let max_index = 0;
+                let max_val = result[0];
+                for (let i = 0; i < result.length; i++) {
+                    r.push(result[i]);
+                    if (result[i] > max_val) {
+                        max_index = i;
+                        max_val = result[i];
+                    }
+                }
+
+                softmax_list = cal_softmax(r);
+                let classes = ["unknown", "good", "heart", "handup"];
+
+                frame_rgba.delete();
+                // frame_crop.delete();
+                frame_rgb.delete();
+
+                return [classes[max_index], softmax_list[max_index]];
+            }
+            catch (ex) {
+                console.log(ex)
+            }
+        }
+        var cal_softmax = function (x) {
+            x = x.map(x => Math.exp(x));
+            let sumcol = 0;
+            for (let item in x) {
+                sumcol += x[item];
+            }
+            x = x.map(x => x / sumcol)
+            return x
+        }
+        var get_gesture_0 = async function () { //手势检测 155*115
+            try {
+                let imgData = context.getImageData(0, 0, 640, 480);
+                var frame = cv2.matFromImageData(imgData);
+
+                let scaled_size = [155, 115];
+                let dsize = new cv2.Size(scaled_size[0] + 5, scaled_size[1] + 5);
+                let frame_rgba = new cv2.Mat();
+                // cv2.resize(frame, frame_rgba, dsize, 0, 0, cv2.INTER_LINEAR);
+                cv2.resize(frame, frame_rgba, dsize, 0, 0, cv2.INTER_CUBIC);
+
+                frame.delete();
+                let rect_tmp = new cv2.Rect(4, 4, 155, 115); //面部矩形
+                let frame_crop = frame_rgba.roi(rect_tmp); //截取到的面部图像
+
+                let frame_rgb = new cv2.Mat();
+                cv2.cvtColor(frame_crop, frame_rgb, cv2.COLOR_RGBA2RGB); //rgba转换成rgb
+
+                let data = frame_rgb.data;
+                let new_Data = new Float32Array(3 * scaled_size[0] * scaled_size[1]);
+                let index = 0;
+
+                for (let i = 0; i < data.length; i += 3) { //数据预处理 cpu-30% debug-15ms
+                    new_Data[index] = (data[i] / 255 - 0.5) / 0.5;
+                    index++;
+                }
+                for (let i = 1; i < data.length; i += 3) {
+                    new_Data[index] = (data[i] / 255 - 0.5) / 0.5;
+                    index++;
+                }
+                for (let i = 2; i < data.length; i += 3) {
+                    new_Data[index] = (data[i] / 255 - 0.5) / 0.5;
+                    index++;
+                }
+
+                let input = new ort.Tensor('float32', new_Data, [1, 3, scaled_size[1], scaled_size[0]]);
+                let feeds = { "input": input };
+                let result = await session.run(feeds); //retinaface 人脸检测 50ms
+                result = result.output.data;
+                let r = [];
+                let max_index = 0;
+                let max_val = result[0];
+                for (let i = 0; i < result.length; i++) {
+                    r.push(result[i]);
+                    if (result[i] > max_val) {
+                        max_index = i;
+                        max_val = result[i];
+                    }
+                }
+
+                softmax_list = cal_softmax(r);
+                let classes = ["unknown", "good", "heart", "handup"];
+
+                frame_rgba.delete();
+                frame_crop.delete();
+                frame_rgb.delete();
+
+                return [classes[max_index], softmax_list[max_index]];
+            }
+            catch (ex) {
+                console.log(ex)
+            }
+        }
+        var cal_softmax = function (x) {
+            x = x.map(x => Math.exp(x));
+            let sumcol = 0;
+            for (let item in x) {
+                sumcol += x[item];
+            }
+            x = x.map(x => x / sumcol)
+            return x
+        }
+
+        window.onload = function () {
+            init_model(); //加载模型
+            start.addEventListener('click', function () {
+                if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+                    navigator.mediaDevices.getUserMedia({
+                        video: true,
+                        audio: false
+                    }).then(function (stream) {
+                        MediaStreamTrack = typeof stream.stop === 'function' ? stream : stream.getTracks()[1];
+                        video.srcObject = stream;
+                        video.play();
+
+
+                        setInterval(function () {
+                            try {
+                                context.drawImage(video, 0, 0);
+                                detect();
+                            }
+                            catch (ex) {
+                                console.log(ex);
+                            }
+                        }, 50);
+
+
+                    }).catch(function (err) {
+                        console.log(err);
+                    });
+                }
+            });
+            // snap.addEventListener('click', function () {
+            //     setInterval(function () {
+            //         try {
+            //             context.drawImage(video, 0, 0);
+            //             detect();
+            //         }
+            //         catch (ex) {
+            //             console.log(ex);
+            //         }
+            //     }, 50);
+            // });
+            close.addEventListener('click', function () {
+                MediaStreamTrack && MediaStreamTrack.stop();
+            });
+        }
+
+    </script>
+</body>
+
+</html>
